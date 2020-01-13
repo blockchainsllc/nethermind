@@ -15,8 +15,12 @@
 //  along with the Nethermind. If not, see <http://www.gnu.org/licenses/>.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Nethermind.Core;
 using Nethermind.Core.Crypto;
 using Nethermind.Core.Encoding;
@@ -38,8 +42,68 @@ namespace Nethermind.Blockchain.Receipts
             _database = receiptsDb ?? throw new ArgumentNullException(nameof(receiptsDb));
             _specProvider = specProvider ?? throw new ArgumentNullException(nameof(specProvider));
 
+            long? lowestInDb = LoadLowest();
+            LowestInsertedReceiptBlock = lowestInDb;
+            
+            Task.Run(Loop, CancellationToken.None).ContinueWith(t =>
+            {
+                if (t.IsFaulted)
+                {
+                    if (_logger.IsError) _logger.Error("Sender address recovery encountered an exception.", t.Exception);
+                }
+                else if (t.IsCanceled)
+                {
+                    if (_logger.IsDebug) _logger.Debug("Sender address recovery stopped.");
+                }
+                else if (t.IsCompleted)
+                {
+                    if (_logger.IsDebug) _logger.Debug("Sender address recovery complete.");
+                }
+            });
+        }
+
+        private long? LoadLowest()
+        {
             byte[] lowestBytes = _database.Get(Keccak.Zero);
-            LowestInsertedReceiptBlock = lowestBytes == null ? (long?) null : new RlpStream(lowestBytes).DecodeLong();
+            long? lowestInDb = lowestBytes == null ? (long?) null : new RlpStream(lowestBytes).DecodeLong();
+            return lowestInDb;
+        }
+
+        private void Loop()
+        {
+            foreach (List<(long BlockNumber, TxReceipt TxReceipt)> receipts in _queue.GetConsumingEnumerable())
+            {
+                long? lowestSoFar = null;
+                Guid batchGuid = Guid.NewGuid();
+                _database.StartBatch(batchGuid);
+                try
+                {
+                    for (int i = 0; i < receipts.Count; i++)
+                    {
+                        TxReceipt txReceipt = receipts[i].TxReceipt;
+                        long blockNumber = receipts[i].BlockNumber;
+                        if (txReceipt == null && blockNumber != 1L)
+                        {
+                            throw new ArgumentNullException(nameof(txReceipt));
+                        }
+
+                        if (txReceipt != null)
+                        {
+                            var spec = _specProvider.GetSpec(blockNumber);
+                            RlpBehaviors behaviors = spec.IsEip658Enabled ? RlpBehaviors.Eip658Receipts : RlpBehaviors.None;
+                            _database.Set(txReceipt.TxHash, Rlp.Encode(txReceipt, behaviors).Bytes);
+                        }
+
+                        lowestSoFar = Math.Min(LowestInsertedReceiptBlock ?? long.MaxValue, blockNumber);
+                    }
+
+                    UpdateLowestInsertedInDb(lowestSoFar);
+                }
+                finally
+                {
+                    _database.CommitBatch(batchGuid);
+                }
+            }
         }
 
         public TxReceipt Find(Keccak hash)
@@ -69,17 +133,16 @@ namespace Nethermind.Blockchain.Receipts
                 behaviors = behaviors | RlpBehaviors.Storage;
             }
 
-            _database.Set(txReceipt.TxHash,
-                Rlp.Encode(txReceipt, behaviors).Bytes);
+            _database.Set(txReceipt.TxHash, Rlp.Encode(txReceipt, behaviors).Bytes);
         }
-        
+
         public void Insert(long blockNumber, TxReceipt txReceipt)
         {
             if (txReceipt == null && blockNumber != 1L)
             {
                 throw new ArgumentNullException(nameof(txReceipt));
             }
-            
+
             if (txReceipt != null)
             {
                 var spec = _specProvider.GetSpec(blockNumber);
@@ -89,46 +152,30 @@ namespace Nethermind.Blockchain.Receipts
 
             UpdateLowestInsertedInDb(blockNumber);
         }
-        
+
+        private readonly BlockingCollection<List<(long BlockNumber, TxReceipt TxReceipt)>> _queue
+            = new BlockingCollection<List<(long BlockNumber, TxReceipt TxReceipt)>>(new ConcurrentQueue<List<(long BlockNumber, TxReceipt TxReceipt)>>());
+
+        [MethodImpl(MethodImplOptions.Synchronized)]
         public void Insert(List<(long BlockNumber, TxReceipt TxReceipt)> receipts)
         {
-            long? lowestSoFar = LowestInsertedReceiptBlock;
-            Guid batchGuid = Guid.NewGuid();
-            _database.StartBatch(batchGuid);
-            try
-            {
-                for (int i = 0; i < receipts.Count; i++)
-                {
-                    TxReceipt txReceipt = receipts[i].TxReceipt;
-                    long blockNumber = receipts[i].BlockNumber;
-                    if (txReceipt == null && blockNumber != 1L)
-                    {
-                        throw new ArgumentNullException(nameof(txReceipt));
-                    }
-
-                    if (txReceipt != null)
-                    {
-                        var spec = _specProvider.GetSpec(blockNumber);
-                        RlpBehaviors behaviors = spec.IsEip658Enabled ? RlpBehaviors.Eip658Receipts : RlpBehaviors.None;
-                        _database.Set(txReceipt.TxHash, Rlp.Encode(txReceipt, behaviors).Bytes);
-                    }
-
-                    lowestSoFar =  Math.Min(LowestInsertedReceiptBlock ?? long.MaxValue, blockNumber);
-                }
-                
-                UpdateLowestInsertedInDb(lowestSoFar);
-            }
-            finally
-            {
-                _database.CommitBatch(batchGuid);
-            }
+            long lowestInThisBatch = receipts.Min(r => r.BlockNumber);
+            _queue.Add(receipts);
+            LowestInsertedReceiptBlock = Math.Min(LowestInsertedReceiptBlock ?? long.MaxValue, lowestInThisBatch);
         }
 
         private void UpdateLowestInsertedInDb(long? lowestSoFar)
         {
-            LowestInsertedReceiptBlock = Math.Min(LowestInsertedReceiptBlock ?? long.MaxValue, lowestSoFar ?? long.MaxValue);
-//              LowestInsertedReceiptBlock = Math.Min(LowestInsertedReceiptBlock ?? long.MaxValue, blockNumber);
-            _database.Set(Keccak.Zero, Rlp.Encode(LowestInsertedReceiptBlock.Value).Bytes);
+            if (!lowestSoFar.HasValue)
+            {
+                return;
+            }
+            
+            long? lowestInDb = LoadLowest();
+            if (lowestSoFar < (lowestInDb ?? 0))
+            {
+                _database.Set(Keccak.Zero, Rlp.Encode(lowestSoFar.Value).Bytes);    
+            }
         }
 
         public long? LowestInsertedReceiptBlock { get; private set; }
