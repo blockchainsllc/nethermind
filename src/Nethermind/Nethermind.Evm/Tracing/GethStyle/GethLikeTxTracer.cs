@@ -114,7 +114,7 @@ namespace Nethermind.Evm.Tracing.GethStyle
                 case EvmExceptionType.StackUnderflow:
                     return "StackUnderflow";
                 case EvmExceptionType.OutOfGas:
-                    return "OutOfGass";
+                    return "OutOfGas";
                 case EvmExceptionType.InvalidJumpDestination:
                     return "BadJumpDestination";
                 case EvmExceptionType.AccessViolation:
@@ -169,6 +169,10 @@ namespace Nethermind.Evm.Tracing.GethStyle
         public void ReportNonceChange(Address address, UInt256? before, UInt256? after)
         {
             throw new NotSupportedException();
+        }
+
+        public void ReportAccountRead(Address address)
+        {
         }
 
         public void ReportStorageChange(StorageCell storageCell, byte[] before, byte[] after)

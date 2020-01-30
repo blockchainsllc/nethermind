@@ -23,6 +23,7 @@ namespace Nethermind.WriteTheDocs
             new ConfigDocsGenerator().Generate();
             new CliDocsGenerator().Generate();
             new RpcDocsGenerator().Generate();
+            new MetricsDocsGenerator().Generate();
         }
     }
 }

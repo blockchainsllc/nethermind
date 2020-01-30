@@ -48,11 +48,10 @@ namespace Nethermind.Store
 
         public StateProvider(ISnapshotableDb stateDb, IDb codeDb, ILogManager logManager)
         {
+            _logManager = logManager ?? throw new ArgumentNullException(nameof(logManager));
+            _logger = logManager.GetClassLogger() ?? throw new ArgumentNullException(nameof(logManager));
             if (stateDb == null) throw new ArgumentNullException(nameof(stateDb));
-            if (logManager == null) throw new ArgumentNullException(nameof(logManager));
-            _logger = logManager?.GetClassLogger() ?? throw new ArgumentNullException(nameof(logManager));
             _codeDb = codeDb ?? throw new ArgumentNullException(nameof(codeDb));
-            _logManager = logManager;
             _tree = new StateTree(stateDb);
         }
 
@@ -60,10 +59,10 @@ namespace Nethermind.Store
         {
             if (visitor == null) throw new ArgumentNullException(nameof(visitor));
             if (stateRoot == null) throw new ArgumentNullException(nameof(stateRoot));
-            
+
             _tree.Accept(visitor, stateRoot);
         }
-        
+
         public string DumpState()
         {
             TreeDumper dumper = new TreeDumper();
@@ -85,7 +84,7 @@ namespace Nethermind.Store
             _tree.UpdateRootHash();
             _needsStateRootUpdate = false;
         }
-        
+
         public Keccak StateRoot
         {
             get
@@ -94,7 +93,7 @@ namespace Nethermind.Store
                 {
                     throw new InvalidOperationException();
                 }
-                
+
                 return _tree.RootHash;
             }
             set => _tree.RootHash = value;
@@ -167,6 +166,7 @@ namespace Nethermind.Store
         private void SetNewBalance(Address address, in UInt256 balanceChange, IReleaseSpec releaseSpec, bool isSubtracting)
         {
             _needsStateRootUpdate = true;
+
             Account GetThroughCacheCheckExists()
             {
                 Account result = GetThroughCache(address);
@@ -179,7 +179,7 @@ namespace Nethermind.Store
                 return result;
             }
 
-            var isZero = balanceChange.IsZero;
+            bool isZero = balanceChange.IsZero;
             if (isZero)
             {
                 if (releaseSpec.IsEip158Enabled)
@@ -360,6 +360,7 @@ namespace Nethermind.Store
 
         public void CreateAccount(Address address, in UInt256 balance)
         {
+            _needsStateRootUpdate = true;
             if (_logger.IsTrace) _logger.Trace($"Creating account: {address} with balance {balance}");
             Account account = balance.IsZero ? Account.TotallyEmpty : new Account(balance);
             PushNew(address, account);
@@ -435,7 +436,7 @@ namespace Nethermind.Store
                 // because it was not committed yet it means that the just cache is the only state (so it was read only)
                 if (isTracing && change.ChangeType == ChangeType.JustCache)
                 {
-                    _nullReadsForTracing.Add(change.Address);
+                    _readsForTracing.Add(change.Address);
                     continue;
                 }
 
@@ -523,15 +524,16 @@ namespace Nethermind.Store
 
             if (isTracing)
             {
-                foreach (Address nullRead in _nullReadsForTracing)
+                foreach (Address nullRead in _readsForTracing)
                 {
+                    // // this may be enough, let us write tests
                     stateTracer.ReportAccountRead(nullRead);
                 }
             }
 
             Resettable<Change>.Reset(ref _changes, ref _capacity, ref _currentPosition, StartCapacity);
             _committedThisRound.Reset();
-            _nullReadsForTracing.Clear();
+            _readsForTracing.Clear();
             _intraBlockCache.Reset();
 
             if (isTracing)
@@ -612,7 +614,7 @@ namespace Nethermind.Store
             _tree.Set(address, account);
         }
 
-        private HashSet<Address> _nullReadsForTracing = new HashSet<Address>();
+        private HashSet<Address> _readsForTracing = new HashSet<Address>();
 
         private Account GetAndAddToCache(Address address)
         {
@@ -624,7 +626,7 @@ namespace Nethermind.Store
             else
             {
                 // just for tracing - potential perf hit, maybe a better solution?
-                _nullReadsForTracing.Add(address);
+                _readsForTracing.Add(address);
             }
 
             return account;
@@ -719,9 +721,10 @@ namespace Nethermind.Store
             if (_logger.IsTrace) _logger.Trace("Clearing state provider caches");
             _intraBlockCache.Reset();
             _committedThisRound.Reset();
-            _nullReadsForTracing.Clear();
+            _readsForTracing.Clear();
             _currentPosition = -1;
             Array.Clear(_changes, 0, _changes.Length);
+            _needsStateRootUpdate = false;
         }
 
         public void CommitTree()
