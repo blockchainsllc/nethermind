@@ -13,7 +13,7 @@ jobs:
     - name: Unshallow fetching
       run: git fetch --unshallow
     - name: Publish to Docker
-      uses: elgohr/Publish-Docker-Github-Action@master
+      uses: elgohr/Publish-Docker-Github-Action@v5
       env:
         GIT_COMMIT: $(git log -1 --format=%h)
       with:
