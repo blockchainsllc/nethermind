@@ -22,7 +22,7 @@ jobs:
           apt-get update && apt-get install docker.io -y
           mv Dockerfile_arm32 Dockerfile
     - name: Publish to Docker
-      uses: elgohr/Publish-Docker-Github-Action@master
+      uses: elgohr/Publish-Docker-Github-Action@v5
       env:
         GIT_COMMIT: $(git log -1 --format=%h)
       with:
